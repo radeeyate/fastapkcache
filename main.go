@@ -27,7 +27,6 @@ var activeDownloads sync.Map
 
 type RequestGroup struct {
 	wg   sync.WaitGroup
-	data []byte
 	err  error
 }
 
@@ -60,7 +59,7 @@ func main() {
 	}
 
 	for _, repository := range repoConfig.Repositories {
-		repositoryBasePath := "./repos/" + repository.Identifier
+		repositoryBasePath := filepath.Join("./repos", repository.Identifier)
 		err = os.Mkdir(repositoryBasePath, 0777)
 		if err != nil && !errors.Is(err, os.ErrExist) {
 			log.Fatal(
@@ -74,14 +73,14 @@ func main() {
 
 		app.Use("/"+repository.Identifier, func(c fiber.Ctx) error {
 			trimmedPath := strings.TrimPrefix(c.Path(), "/"+repository.Identifier)
-			retrievalPath := repository.BaseURL + trimmedPath
+			retrievalURL := repository.BaseURL + trimmedPath
 
-			if _, err := os.Stat(repositoryBasePath + trimmedPath); err == nil {
+			if _, err := os.Stat(filepath.Join(repositoryBasePath, trimmedPath)); err == nil {
 				log.Info("Package in cache", "package", trimmedPath)
 				return c.Next()
 			}
 
-			if actual, loaded := activeDownloads.Load(retrievalPath); loaded &&
+			if actual, loaded := activeDownloads.Load(retrievalURL); loaded &&
 				filepath.Base(trimmedPath) != "APKINDEX.tar.gz" {
 				reqGroup := actual.(*RequestGroup)
 				log.Info("Waiting for existing download", "package", trimmedPath)
@@ -97,16 +96,16 @@ func main() {
 
 			reqGroup := &RequestGroup{}
 			reqGroup.wg.Add(1)
-			activeDownloads.Store(retrievalPath, reqGroup)
+			activeDownloads.Store(retrievalURL, reqGroup)
 
 			defer func() {
-				activeDownloads.Delete(retrievalPath)
+				activeDownloads.Delete(retrievalURL)
 				reqGroup.wg.Done()
 			}()
 
 			log.Info("Downloading Alpine Package", "package", trimmedPath)
 
-			res, err := client.R().Get(retrievalPath)
+			res, err := client.R().Get(retrievalURL)
 			if err != nil {
 				log.Error("Failed to download", "package", trimmedPath, "error", err)
 				reqGroup.err = err
@@ -124,26 +123,27 @@ func main() {
 				return c.SendStream(res.Body)
 			}
 
-			err = os.MkdirAll(repositoryBasePath+filepath.Dir(trimmedPath), 0777)
+			repositoryDirectory := filepath.Join(repositoryBasePath, filepath.Dir(trimmedPath))
+			err = os.MkdirAll(repositoryDirectory, 0777)
 			if err != nil {
 				reqGroup.err = err
 				log.Error(
 					"Error creating repository directories",
 					"path",
-					repositoryBasePath+filepath.Dir(trimmedPath),
+					repositoryDirectory,
 					"err",
 					err,
 				)
-
 			}
 
-			err = os.WriteFile(repositoryBasePath+trimmedPath, res.Bytes(), 0644)
+			packagePath := filepath.Join(repositoryBasePath, trimmedPath)
+			err = os.WriteFile(packagePath, res.Bytes(), 0644)
 			if err != nil {
 				reqGroup.err = err
 				log.Error(
 					"Error writing package",
 					"path",
-					repositoryBasePath+trimmedPath,
+					packagePath,
 					"err",
 					err,
 				)
